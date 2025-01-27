@@ -13,12 +13,12 @@ import me.bechberger.ebpf.bpf.Scheduler;
 import me.bechberger.ebpf.bpf.map.BPFLRUHashMap;
 import me.bechberger.ebpf.runtime.BpfDefinitions;
 import me.bechberger.ebpf.runtime.TaskDefinitions;
+import me.bechberger.ebpf.type.Box;
 import me.bechberger.ebpf.type.Enum;
 import me.bechberger.ebpf.type.Ptr;
 import me.bechberger.fuzz.util.DurationConverter;
 
-import static me.bechberger.ebpf.bpf.BPFJ._continue;
-import static me.bechberger.ebpf.bpf.BPFJ.bpf_trace_printk;
+import static me.bechberger.ebpf.bpf.BPFJ.*;
 import static me.bechberger.ebpf.bpf.Scheduler.PerProcessFlags.PF_KTHREAD;
 import static me.bechberger.ebpf.runtime.BpfDefinitions.bpf_cpumask_test_cpu;
 import static me.bechberger.ebpf.runtime.ScxDefinitions.*;
@@ -49,14 +49,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     }
 
     @Type
-    public enum CPUMode implements Enum<CPUMode> {
-        SHARED, EXCLUSIVE,
-        /** Don't schedule on the HT siblings of the cores */
-        HT_EXCLUSIVE
-    }
-
-    @Type
-    public record SchedulerSetting(int scriptPID, int cores, DurationRange sleepRange, DurationRange runRange, int systemSliceNs, int sliceNs, int seed, CPUMode cpuMode, boolean scaleSlice, boolean log) {
+    public record SchedulerSetting(int scriptPID, DurationRange sleepRange, DurationRange runRange, int systemSliceNs, int sliceNs, int seed, boolean scaleSlice, boolean log) {
     }
 
     @Type
@@ -81,7 +74,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
 
     private static final int SHARED_DSQ_ID = 0;
 
-    final GlobalVariable<SchedulerSetting> schedulerSetting = new GlobalVariable<>(new SchedulerSetting(1,1, new DurationRange(0, 0), new DurationRange(0, 0), 1000000, 1000000, 0, CPUMode.SHARED, true, false));
+    final GlobalVariable<SchedulerSetting> schedulerSetting = new GlobalVariable<>(new SchedulerSetting(0, new DurationRange(0, 0), new DurationRange(0, 0), 1000000, 1000000, 0, true, false));
 
     @BPFMapDefinition(maxEntries = 10000)
     BPFLRUHashMap<@Unsigned Integer, TaskContext> taskContexts;
@@ -95,8 +88,26 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     @BPFFunction
     @AlwaysInline
     boolean isTaskScriptRelated(Ptr<TaskDefinitions.task_struct> task) {
-        var ret = isScriptRelated.bpf_get(task.val().pid);
-        return task.val().pid == schedulerSetting.get().scriptPID || (ret != null && ret.val());
+        var curPid = task.val().tgid;
+        var tgidRel = isScriptRelated.bpf_get(curPid);
+        var scriptPid = schedulerSetting.get().scriptPID;
+        if (scriptPid == 0) {
+            return false;
+        }
+        if (tgidRel == null) {
+            var isRelated = curPid == scriptPid;
+            if (!isRelated) {
+                // bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
+                // check parent process
+                var parentTGid = task.val().real_parent.val().tgid;
+                var parentPid = task.val().real_parent.val().pid;
+                isRelated = parentPid == scriptPid || parentTGid == scriptPid;
+            }
+            isScriptRelated.put(task.val().pid, isRelated);
+            isScriptRelated.put(curPid, isRelated);
+            return isRelated;
+        }
+        return tgidRel.val();
     }
 
     /**
@@ -104,7 +115,6 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
      * (h<a href="ttps://en.wikipedia.org/wiki/Lehmer_random_number_generator)">wikipedia</a>
      */
     @BPFFunction
-    @AlwaysInline
     @Unsigned long random() {
         randomState.set(randomState.get() * 48271 % 0x7fffffff);
         return randomState.get();
@@ -114,46 +124,46 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
      * Generate a random number in the range [min, max)
      */
     @BPFFunction
-    @AlwaysInline
     @Unsigned long randomInRange(@Unsigned long min, @Unsigned long max) {
         return min + random() % (max - min);
     }
 
     @BPFFunction
     @AlwaysInline
-    void getTaskContext(Ptr<TaskDefinitions.task_struct> task, Ptr<Ptr<TaskContext>> statPtr) {
+    void getTaskContext(Ptr<TaskDefinitions.task_struct> task, Ptr<Ptr<TaskContext>> contextPtr) {
         var id = task.val().tgid;
         var ret = taskContexts.bpf_get(id);
         if (ret == null) {
-            var stat = new TaskContext();
-            stat.lastStartNs = 0;
-            stat.runtimeSinceLastSleepNs = 0;
-            stat.lastStopNs = 0;
-            taskContexts.put(id, stat);
+            var context = new TaskContext();
+            context.state = TaskState.START;
+            context.lastStartNs = 0;
+            context.runtimeSinceLastSleepNs = 0;
+            context.lastStopNs = 0;
+            taskContexts.put(id, context);
         }
         var ret2 = taskContexts.bpf_get(id);
-        statPtr.set(ret2);
+        contextPtr.set(ret2);
     }
 
     @BPFFunction
     @AlwaysInline
-    void initSleeping(Ptr<TaskContext> stat, Ptr<TaskDefinitions.task_struct> p) {
-        stat.val().state = TaskState.SLEEPING;
-        stat.val().lastStopNs = bpf_ktime_get_ns();
-        stat.val().timeAllowedInState = randomInRange(schedulerSetting.get().sleepRange.minNs(), schedulerSetting.get().sleepRange.maxNs());
+    void initSleeping(Ptr<TaskContext> context, Ptr<TaskDefinitions.task_struct> p) {
+        context.val().state = TaskState.SLEEPING;
+        context.val().lastStopNs = bpf_ktime_get_ns();
+        context.val().timeAllowedInState = randomInRange(schedulerSetting.get().sleepRange.minNs(), schedulerSetting.get().sleepRange.maxNs());
         if (schedulerSetting.get().log()) {
-            bpf_trace_printk("Task %d (%s) is sleeping for %s\n", stat.val().timeAllowedInState, p.val().comm);
+            bpf_trace_printk("Task %d (%s) is sleeping for %dms\n", context.val().timeAllowedInState, p.val().comm, context.val().timeAllowedInState / 1_000_000);
         }
     }
 
     @BPFFunction
     @AlwaysInline
-    void initRunning(Ptr<TaskContext> stat, Ptr<TaskDefinitions.task_struct> p) {
-        stat.val().state = TaskState.RUNNING;
-        stat.val().lastStopNs = bpf_ktime_get_ns();
-        stat.val().timeAllowedInState = randomInRange(schedulerSetting.get().runRange.minNs(), schedulerSetting.get().runRange.maxNs());
+    void initRunning(Ptr<TaskContext> context, Ptr<TaskDefinitions.task_struct> p) {
+        context.val().state = TaskState.RUNNING;
+        context.val().lastStopNs = bpf_ktime_get_ns();
+        context.val().timeAllowedInState = randomInRange(schedulerSetting.get().runRange.minNs(), schedulerSetting.get().runRange.maxNs());
         if (schedulerSetting.get().log()) {
-            bpf_trace_printk("Task %d (%s) is running for %s\n", stat.val().timeAllowedInState, p.val().comm);
+            bpf_trace_printk("Task %d (%s) is running for %dms\n", context.val().timeAllowedInState, p.val().comm, context.val().timeAllowedInState / 1_000_000);
         }
     }
 
@@ -163,31 +173,30 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (!isTaskScriptRelated(p)) { // don't schedule tasks that are not related to the script
             return true;
         }
-        Ptr<TaskContext> stat = null;
-        getTaskContext(p, Ptr.of(stat));
-        if (stat == null) {
+        Ptr<TaskContext> context = null;
+        getTaskContext(p, Ptr.of(context));
+        if (context == null) {
             return true;
         }
-
-        if (stat.val().state == TaskState.START) { // initialize the task, randomly choose if it should sleep or run
+        if (context.val().state == TaskState.START) { // initialize the task, randomly choose if it should sleep or run
             if (randomInRange(0, 2) == 0) {
-                initSleeping(stat, p);
+                initSleeping(context, p);
                 return false;
             } else {
-                initRunning(stat, p);
+                initRunning(context, p);
                 return true;
             }
         }
 
-        if (stat.val().state == TaskState.RUNNING) { // check if the task has to sleep
-            if (stat.val().runtimeSinceLastSleepNs >= stat.val().timeAllowedInState) { // sleep if the task has run too long
-                initSleeping(stat, p);
+        if (context.val().state == TaskState.RUNNING) { // check if the task has to sleep
+            if (context.val().runtimeSinceLastSleepNs >= context.val().timeAllowedInState) { // sleep if the task has run too long
+                initSleeping(context, p);
                 return false;
             }
             return true;
         } else { // check if the task can be scheduled again
-            if (bpf_ktime_get_ns() - stat.val().lastStopNs >= stat.val().timeAllowedInState) {
-                initRunning(stat, p);
+            if (bpf_ktime_get_ns() - context.val().lastStopNs >= context.val().timeAllowedInState) {
+                initRunning(context, p);
                 return true;
             }
             return false;
@@ -221,6 +230,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     }
 
     @BPFFunction
+    @AlwaysInline
     public boolean hasConstraints(Ptr<TaskDefinitions.task_struct> p) {
         return ((p.val().flags & PF_KTHREAD) != 0) || (p.val().nr_cpus_allowed != scx_bpf_nr_cpu_ids());
     }
@@ -228,20 +238,6 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     @BPFFunction
     @AlwaysInline
     public boolean canScheduleOnCPU(Ptr<TaskDefinitions.task_struct> p, int cpu) {
-        if (schedulerSetting.get().cpuMode() == CPUMode.SHARED) {
-            return true;
-        }
-        if (schedulerSetting.get().cpuMode() == CPUMode.EXCLUSIVE) {
-            return cpu < scx_bpf_nr_cpu_ids() - schedulerSetting.get().cores || isTaskScriptRelated(p);
-        }
-        if (schedulerSetting.get().cpuMode() == CPUMode.HT_EXCLUSIVE) {
-            int cores = schedulerSetting.get().cores;
-            @Unsigned int num = scx_bpf_nr_cpu_ids();
-            if (cpu > num / 2 && cpu >= num - cores) { // avoid HT siblings
-                return false;
-            }
-            return cpu < num - cores || isTaskScriptRelated(p);
-        }
         return true;
     }
 
@@ -263,11 +259,11 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (!isTaskScriptRelated(p)) {
             return;
         }
-        Ptr<TaskContext> stat = null;
-        getTaskContext(p, Ptr.of(stat));
-        if (stat != null) {
-            stat.val().lastStopNs = 0;
-            stat.val().lastStartNs = bpf_ktime_get_ns();
+        Ptr<TaskContext> context = null;
+        getTaskContext(p, Ptr.of(context));
+        if (context != null) {
+            context.val().lastStopNs = 0;
+            context.val().lastStartNs = bpf_ktime_get_ns();
         }
     }
 
@@ -276,10 +272,10 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (!isTaskScriptRelated(p)) {
             return;
         }
-        Ptr<TaskContext> stat = null;
-        getTaskContext(p, Ptr.of(stat));
-        if (stat != null) {
-            stat.val().runtimeSinceLastSleepNs = stat.val().runtimeSinceLastSleepNs + (bpf_ktime_get_ns() - stat.val().lastStartNs);
+        Ptr<TaskContext> context = null;
+        getTaskContext(p, Ptr.of(context));
+        if (context != null) {
+            context.val().runtimeSinceLastSleepNs = context.val().runtimeSinceLastSleepNs + (bpf_ktime_get_ns() - context.val().lastStartNs);
         }
     }
 
@@ -288,12 +284,18 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     void setupIsTaskRelatedToScript(Ptr<TaskDefinitions.task_struct> task) {
         var curPid = task.val().tgid;
         var tgidRel = isScriptRelated.bpf_get(curPid);
+        var scriptPid = schedulerSetting.get().scriptPID;
+        if (scriptPid == 0) {
+            return;
+        }
         if (tgidRel == null) {
-            var isRelated = curPid == schedulerSetting.get().scriptPID();
+            var isRelated = curPid == scriptPid;
             if (!isRelated) {
+               // bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
                 // check parent process
-                var parentPid = task.val().real_parent.val().tgid;
-                isRelated = parentPid == schedulerSetting.get().scriptPID();
+                var parentTGid = task.val().real_parent.val().tgid;
+                var parentPid = task.val().real_parent.val().pid;
+                isRelated = parentPid == scriptPid || parentTGid == scriptPid;
             }
             isScriptRelated.put(task.val().pid, isRelated);
             isScriptRelated.put(curPid, isRelated);
@@ -303,6 +305,9 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     @Override
     public void enable(Ptr<TaskDefinitions.task_struct> p) {
         setupIsTaskRelatedToScript(p);
+        if (isTaskScriptRelated(p)) {
+            bpf_trace_printk("Hey %s", p.val().comm);
+        }
     }
 
     @Override

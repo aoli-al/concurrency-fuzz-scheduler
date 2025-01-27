@@ -7,7 +7,7 @@ import me.bechberger.fuzz.util.DurationConverter;
 import me.bechberger.fuzz.util.DurationRangeConverter;
 import picocli.CommandLine;
 
-import java.io.IOException;
+import java.io.*;
 
 import static picocli.CommandLine.Option;
 import static picocli.CommandLine.Parameters;
@@ -16,18 +16,14 @@ import static picocli.CommandLine.Parameters;
         description = "Linux scheduler that produces random scheduling edge case to fuzz concurrent applications, runs till error")
 public class Main implements Runnable{
 
-    @Parameters(arity = "1..*", paramLabel = "script", description = "Script or command to execute")
+    @Parameters(arity = "1", paramLabel = "script", description = "Script or command to execute")
     String script;
 
-    @Option(names = {"-c", "--cpus"}, defaultValue = "-1",
-            description = "Number of cores to use, -1 for all cores")
-    int cpus;
-
-    @Option(names = {"-s", "--sleep"}, defaultValue = "10ms,20s",
+    @Option(names = {"-s", "--sleep"}, defaultValue = "10ms,500ms",
             description = "Range of sleep lengths", converter = DurationRangeConverter.class)
     FIFOScheduler.DurationRange sleepRange;
 
-    @Option(names = {"-r", "--run"}, defaultValue = "10ms,20s",
+    @Option(names = {"-r", "--run"}, defaultValue = "10ms,500ms",
             description = "Range of running time lengths", converter = DurationRangeConverter.class)
     FIFOScheduler.DurationRange runRange;
 
@@ -46,10 +42,6 @@ public class Main implements Runnable{
     @Option(names = {"-i", "--iteration-time"}, defaultValue = "10s",
             description = "Time to run the script for at a time, restart the whole process afterward with same seed", converter = DurationConverter.class)
     int iterationTimeNs;
-
-    @Option(names = {"-x", "--cpu-mode"}, defaultValue = "HT_EXCLUSIVE",
-            description = "Keep the cpu exclusive to the script, one of: ${COMPLETION-CANDIDATES}")
-    FIFOScheduler.CPUMode cpuMode;
 
     @Option(names = {"-d", "--dont-scale-slice"}, defaultValue = "false",
             description = "Don't scale the slice time with the number of waiting tasks")
@@ -92,35 +84,64 @@ public class Main implements Runnable{
         return curRandomState;
     }
 
+    private void startPrintThread(InputStream source, OutputStream dest) {
+        var thread = new Thread(() -> {
+            try {
+                while (true) {
+                    var read = source.read();
+                    if (read == -1) {
+                        break;
+                    }
+                    dest.write(source.read());
+                }
+            } catch (Exception ex) {}
+        });
+        thread.setDaemon(true);
+        thread.start();
+    }
+
     /**
      * @return boolean should continue
      */
     boolean iteration() throws InterruptedException, IOException {
         boolean didProgramFail = false;
         Process process;
-        long startTime = System.nanoTime();
         try (var scheduler = BPFProgram.load(FIFOScheduler.class)) {
             System.out.println("loaded");
             // we have a circular dependency here between getting the pid and setting the scheduler setting
             // sleeping for two seconds should prevent any issues
-            process = new ProcessBuilder("/bin/sh", "-c", "sleep 2; " + script).inheritIO().start();
-            scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting((int)process.pid(), cpus, sleepRange, runRange, systemSliceNs, sliceNs, random(), cpuMode, !dontScaleSlice, log));
+
+            scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting(0, sleepRange, runRange, systemSliceNs, sliceNs, random(), !dontScaleSlice, log));
+
             scheduler.attachScheduler();
-            System.out.println("attached");
-            long lastErrorCheckTime = System.nanoTime();
+
+            process = new ProcessBuilder(script).start();
+
+            scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting((int)process.pid(), sleepRange, runRange, systemSliceNs, sliceNs, random(), !dontScaleSlice, log));
+
+            // print err and out using threads
+            startPrintThread(process.getErrorStream(), System.err);
+            startPrintThread(process.getInputStream(), System.out);
+
+            long startTime = System.currentTimeMillis();
+            long lastErrorCheckTime = System.currentTimeMillis();
             while (scheduler.isSchedulerAttachedProperly()) {
                 Thread.sleep(100);
                 if (!process.isAlive() && process.exitValue() != 0) {
                     didProgramFail = true;
                     break;
                 }
-                if (System.nanoTime() > lastErrorCheckTime + errorCheckIntervalNs) {
+                if (System.currentTimeMillis() > lastErrorCheckTime + errorCheckIntervalNs / 1_000_000) {
                     if (doesErrorScriptSucceed()) {
+                        System.out.println("Break because process isn't alive");
+
                         didProgramFail = true;
                         break;
                     }
                 }
-                if (startTime + iterationTimeNs < System.nanoTime()) {
+                if (startTime + iterationTimeNs / 1_000_000 < System.currentTimeMillis()) {
+                    System.out.println("Break because process isn't alive222 " + iterationTimeNs / 1_000_000);
+
                     break;
                 }
             }
@@ -135,6 +156,7 @@ public class Main implements Runnable{
 
     @Override
     public void run() {
+        this.randomState = seed;
         if (log) {
             var logPrintThread = new Thread(() -> {
                 TraceLog.getInstance().printLoop(true);
@@ -160,7 +182,6 @@ public class Main implements Runnable{
     public static void main(String[] args) throws InterruptedException {
         var cli = new CommandLine(new Main());
         cli.setUnmatchedArgumentsAllowed(false)
-                .registerConverter(FIFOScheduler.CPUMode.class, name -> FIFOScheduler.CPUMode.valueOf(name.toUpperCase()))
                 .execute(args);
     }
 

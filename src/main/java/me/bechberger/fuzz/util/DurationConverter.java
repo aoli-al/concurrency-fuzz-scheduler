@@ -16,14 +16,17 @@ public class DurationConverter implements CommandLine.ITypeConverter<Integer> {
             throw new IllegalArgumentException("Invalid duration string: " + text);
         }
         int unit = 1_000_000_000;
+        int unitLength = 2;
         if (text.endsWith("ms")) {
             unit = 1_000_000;
         } else if (text.endsWith("us")) {
             unit = 1_000;
         } else if (text.endsWith("ns")) {
             unit = 1;
+        } else {
+            unitLength = 1;
         }
-        return (int) (Double.parseDouble(text.substring(0, text.length() - 2)) * unit);
+        return (int) (Double.parseDouble(text.substring(0, text.length() - unitLength)) * unit);
     }
 
     public static String nanoSecondsToString(long nanoSeconds, int decimals) {

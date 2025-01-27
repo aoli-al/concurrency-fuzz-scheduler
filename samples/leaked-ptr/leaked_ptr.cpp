@@ -4,6 +4,9 @@
 #include <thread>
 
 int main() {
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{1000});
+
   auto* a = new uint8_t[1024*1024];
 
   std::jthread t1{[](uint8_t* d) {
