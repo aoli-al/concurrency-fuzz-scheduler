@@ -2,16 +2,16 @@ package me.bechberger.fuzz.util;
 
 import picocli.CommandLine;
 
-public class DurationConverter implements CommandLine.ITypeConverter<Integer> {
+public class DurationConverter implements CommandLine.ITypeConverter<Long> {
     @Override
-    public Integer convert(String value) {
+    public Long convert(String value) {
         return parseToNanoSeconds(value);
     }
 
     /**
      * Parse any duration string to time, support "s" and "ms" and fractions and fractions
      */
-    static int parseToNanoSeconds(String text) {
+    static long parseToNanoSeconds(String text) {
         if (!text.matches("[0-9]+(\\.[0-9]+)?(ms|us|ns|s)")) {
             throw new IllegalArgumentException("Invalid duration string: " + text);
         }
@@ -26,7 +26,7 @@ public class DurationConverter implements CommandLine.ITypeConverter<Integer> {
         } else {
             unitLength = 1;
         }
-        return (int) (Double.parseDouble(text.substring(0, text.length() - unitLength)) * unit);
+        return (long) (Double.parseDouble(text.substring(0, text.length() - unitLength)) * unit);
     }
 
     public static String nanoSecondsToString(long nanoSeconds, int decimals) {

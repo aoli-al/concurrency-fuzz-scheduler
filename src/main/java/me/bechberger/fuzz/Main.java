@@ -19,29 +19,29 @@ public class Main implements Runnable{
     @Parameters(arity = "1", paramLabel = "script", description = "Script or command to execute")
     String script;
 
-    @Option(names = {"-s", "--sleep"}, defaultValue = "10ms,500ms",
+    @Option(names = {"-s", "--sleep"}, defaultValue = "100ms,10000ms",
             description = "Range of sleep lengths", converter = DurationRangeConverter.class)
     FIFOScheduler.DurationRange sleepRange;
 
-    @Option(names = {"-r", "--run"}, defaultValue = "10ms,500ms",
+    @Option(names = {"-r", "--run"}, defaultValue = "1ms,20ms",
             description = "Range of running time lengths", converter = DurationRangeConverter.class)
     FIFOScheduler.DurationRange runRange;
 
     @Option(names = {"--system-slice"}, defaultValue = "5ms",
             description = "Time slice duration for all non-script tasks", converter = DurationConverter.class)
-    int systemSliceNs;
+    long systemSliceNs;
 
     @Option(names = {"--slice"}, defaultValue = "5ms",
             description = "Time slice duration for the script", converter = DurationConverter.class)
-    int sliceNs;
+    long sliceNs;
 
     @Option(names = {"-e", "--error-command"}, defaultValue = "",
             description = "Command to execute on error, default checks for error code != 0")
     String errorCommand;
 
-    @Option(names = {"-i", "--iteration-time"}, defaultValue = "10s",
+    @Option(names = {"-i", "--iteration-time"}, defaultValue = "1000s",
             description = "Time to run the script for at a time, restart the whole process afterward with same seed", converter = DurationConverter.class)
-    int iterationTimeNs;
+    long iterationTimeNs;
 
     @Option(names = {"-d", "--dont-scale-slice"}, defaultValue = "false",
             description = "Don't scale the slice time with the number of waiting tasks")
@@ -57,7 +57,7 @@ public class Main implements Runnable{
 
     @Option(names = "--error-check-interval", defaultValue = "10s",
             description = "Time between two checks via the error script", converter = DurationConverter.class)
-    int errorCheckIntervalNs;
+    long errorCheckIntervalNs;
 
     @Option(names = "--log", defaultValue = "false",
             description = "Log the state changes")
@@ -84,27 +84,14 @@ public class Main implements Runnable{
         return curRandomState;
     }
 
-    private void startPrintThread(InputStream source, OutputStream dest) {
-        var thread = new Thread(() -> {
-            try (source; dest) { // Ensures streams are closed automatically
-                byte[] buffer = new byte[8192]; // Buffer size for copying
-                int bytesRead;
-                while ((bytesRead = source.read(buffer)) != -1) {
-                    dest.write(buffer, bytesRead, 0);
-                }
-            } catch (IOException e) {
-                e.printStackTrace(); // Handle exceptions
-            }
-        });
-        thread.setDaemon(true); // Set thread as daemon to not block JVM shutdown
-        thread.start();
-    }
-
 
     /**
      * @return boolean should continue
      */
     boolean iteration() throws InterruptedException, IOException {
+        System.out.println("iterationtime " + iterationTimeNs);
+        System.out.println("runtime " + runRange);
+        System.out.println("slice " + sliceNs);
         boolean didProgramFail = false;
         Process process;
         try (var scheduler = BPFProgram.load(FIFOScheduler.class)) {
@@ -120,16 +107,14 @@ public class Main implements Runnable{
 
             scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting((int)process.pid(), sleepRange, runRange, systemSliceNs, sliceNs, random(), !dontScaleSlice, log));
 
-            // print err and out using threads
-            startPrintThread(process.getErrorStream(), System.err);
-            startPrintThread(process.getInputStream(), System.out);
-
             long startTime = System.currentTimeMillis();
             long lastErrorCheckTime = System.currentTimeMillis();
             while (scheduler.isSchedulerAttachedProperly()) {
                 Thread.sleep(100);
-                if (!process.isAlive() && process.exitValue() != 0) {
-                    didProgramFail = true;
+                if (!process.isAlive()) {
+                    if (process.exitValue() != 0) {
+                        didProgramFail = true;
+                    }
                     break;
                 }
                 if (System.currentTimeMillis() > lastErrorCheckTime + errorCheckIntervalNs / 1_000_000) {
@@ -141,7 +126,7 @@ public class Main implements Runnable{
                     }
                 }
                 if (startTime + iterationTimeNs / 1_000_000 < System.currentTimeMillis()) {
-                    System.out.println("Break because process isn't alive222 " + iterationTimeNs / 1_000_000);
+                    System.out.println("Break because process isn't alive222 " + iterationTimeNs / 1_000_000 );
 
                     break;
                 }

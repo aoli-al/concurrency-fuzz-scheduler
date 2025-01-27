@@ -42,6 +42,11 @@ mvn package
 
 You can speed it up with `mvnd`.
 
+TODO
+----
+- Add java mode that does the comm check
+- add flag to treat runtime in two ways
+
 License
 =======
 GPLv2

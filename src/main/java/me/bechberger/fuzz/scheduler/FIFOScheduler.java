@@ -1,6 +1,7 @@
 package me.bechberger.fuzz.scheduler;
 
 import me.bechberger.ebpf.annotations.AlwaysInline;
+import me.bechberger.ebpf.annotations.Size;
 import me.bechberger.ebpf.annotations.Type;
 import me.bechberger.ebpf.annotations.Unsigned;
 import me.bechberger.ebpf.annotations.bpf.BPF;
@@ -49,7 +50,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     }
 
     @Type
-    public record SchedulerSetting(int scriptPID, DurationRange sleepRange, DurationRange runRange, int systemSliceNs, int sliceNs, int seed, boolean scaleSlice, boolean log) {
+    public record SchedulerSetting(int scriptPID, DurationRange sleepRange, DurationRange runRange, long systemSliceNs, long sliceNs, int seed, boolean scaleSlice, boolean log) {
     }
 
     @Type
@@ -125,6 +126,9 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
      */
     @BPFFunction
     @Unsigned long randomInRange(@Unsigned long min, @Unsigned long max) {
+        if (min == max) {
+            return min;
+        }
         return min + random() % (max - min);
     }
 
@@ -178,6 +182,9 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (context == null) {
             return true;
         }
+        if (p.val().comm[0] != 'j') {
+            return true;
+        }
         if (context.val().state == TaskState.START) { // initialize the task, randomly choose if it should sleep or run
             if (randomInRange(0, 2) == 0) {
                 initSleeping(context, p);
@@ -189,7 +196,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         }
 
         if (context.val().state == TaskState.RUNNING) { // check if the task has to sleep
-            if (context.val().runtimeSinceLastSleepNs >= context.val().timeAllowedInState) { // sleep if the task has run too long
+            if (bpf_ktime_get_ns() - context.val().lastStopNs >= context.val().timeAllowedInState) { // sleep if the task has run too long
                 initSleeping(context, p);
                 return false;
             }
@@ -212,7 +219,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     @Override
     public void enqueue(Ptr<TaskDefinitions.task_struct> p, long enq_flags) {
         var isScriptRelated = isTaskScriptRelated(p);
-        @Unsigned int sliceLength = isScriptRelated ? schedulerSetting.get().sliceNs() : schedulerSetting.get().systemSliceNs();
+        @Unsigned long sliceLength = isScriptRelated ? schedulerSetting.get().sliceNs() : schedulerSetting.get().systemSliceNs();
         if (schedulerSetting.get().scaleSlice()) {
             sliceLength = sliceLength / scx_bpf_dsq_nr_queued(SHARED_DSQ_ID);
         }
@@ -262,7 +269,6 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         Ptr<TaskContext> context = null;
         getTaskContext(p, Ptr.of(context));
         if (context != null) {
-            context.val().lastStopNs = 0;
             context.val().lastStartNs = bpf_ktime_get_ns();
         }
     }
