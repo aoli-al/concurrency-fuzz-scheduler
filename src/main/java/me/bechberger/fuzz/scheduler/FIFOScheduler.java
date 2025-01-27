@@ -305,9 +305,6 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     @Override
     public void enable(Ptr<TaskDefinitions.task_struct> p) {
         setupIsTaskRelatedToScript(p);
-        if (isTaskScriptRelated(p)) {
-            bpf_trace_printk("Hey %s", p.val().comm);
-        }
     }
 
     @Override

@@ -86,19 +86,20 @@ public class Main implements Runnable{
 
     private void startPrintThread(InputStream source, OutputStream dest) {
         var thread = new Thread(() -> {
-            try {
-                while (true) {
-                    var read = source.read();
-                    if (read == -1) {
-                        break;
-                    }
-                    dest.write(source.read());
+            try (source; dest) { // Ensures streams are closed automatically
+                byte[] buffer = new byte[8192]; // Buffer size for copying
+                int bytesRead;
+                while ((bytesRead = source.read(buffer)) != -1) {
+                    dest.write(buffer, bytesRead, 0);
                 }
-            } catch (Exception ex) {}
+            } catch (IOException e) {
+                e.printStackTrace(); // Handle exceptions
+            }
         });
-        thread.setDaemon(true);
+        thread.setDaemon(true); // Set thread as daemon to not block JVM shutdown
         thread.start();
     }
+
 
     /**
      * @return boolean should continue
