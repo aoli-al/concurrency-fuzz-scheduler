@@ -100,7 +100,7 @@
                     </descriptorRefs>
                     <archive>
                         <manifest>
-                            <mainClass>me.bechberger.sos.Main</mainClass>
+                            <mainClass>me.bechberger.fuzz.Main</mainClass>
                         </manifest>
                     </archive>
                 </configuration>

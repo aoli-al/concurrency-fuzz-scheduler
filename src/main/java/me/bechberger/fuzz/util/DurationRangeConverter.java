@@ -1,9 +1,9 @@
-package me.bechberger.sos.util;
+package me.bechberger.fuzz.util;
 
-import me.bechberger.sos.scheduler.FIFOScheduler;
+import me.bechberger.fuzz.scheduler.FIFOScheduler;
 import picocli.CommandLine;
 
-import static me.bechberger.sos.util.DurationConverter.parseToNanoSeconds;
+import static me.bechberger.fuzz.util.DurationConverter.parseToNanoSeconds;
 
 public class DurationRangeConverter implements CommandLine.ITypeConverter<FIFOScheduler.DurationRange> {
 
