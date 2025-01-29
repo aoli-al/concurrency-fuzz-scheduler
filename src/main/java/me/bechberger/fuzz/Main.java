@@ -2,28 +2,31 @@ package me.bechberger.fuzz;
 
 import me.bechberger.ebpf.bpf.BPFProgram;
 import me.bechberger.ebpf.shared.TraceLog;
+import me.bechberger.ebpf.type.Box;
 import me.bechberger.fuzz.scheduler.FIFOScheduler;
+import me.bechberger.fuzz.util.DiagramHelper;
 import me.bechberger.fuzz.util.DurationConverter;
 import me.bechberger.fuzz.util.DurationRangeConverter;
 import picocli.CommandLine;
 
 import java.io.*;
+import java.util.Random;
 
 import static picocli.CommandLine.Option;
 import static picocli.CommandLine.Parameters;
 
 @CommandLine.Command(name = "scheduler.sh", mixinStandardHelpOptions = true,
         description = "Linux scheduler that produces random scheduling edge case to fuzz concurrent applications, runs till error")
-public class Main implements Runnable{
+public class Main implements Runnable {
 
     @Parameters(arity = "1", paramLabel = "script", description = "Script or command to execute")
     String script;
 
-    @Option(names = {"-s", "--sleep"}, defaultValue = "100ms,10000ms",
+    @Option(names = {"-s", "--sleep"}, defaultValue = "10ms,2000ms",
             description = "Range of sleep lengths", converter = DurationRangeConverter.class)
     FIFOScheduler.DurationRange sleepRange;
 
-    @Option(names = {"-r", "--run"}, defaultValue = "1ms,20ms",
+    @Option(names = {"-r", "--run"}, defaultValue = "1ms,100ms",
             description = "Range of running time lengths", converter = DurationRangeConverter.class)
     FIFOScheduler.DurationRange runRange;
 
@@ -39,17 +42,13 @@ public class Main implements Runnable{
             description = "Command to execute on error, default checks for error code != 0")
     String errorCommand;
 
-    @Option(names = {"-i", "--iteration-time"}, defaultValue = "1000s",
-            description = "Time to run the script for at a time, restart the whole process afterward with same seed", converter = DurationConverter.class)
+    @Option(names = {"-i", "--iteration-time"}, defaultValue = "100s",
+            description = "Time to run the script for at a time, restart the whole process afterwards", converter = DurationConverter.class)
     long iterationTimeNs;
 
     @Option(names = {"-d", "--dont-scale-slice"}, defaultValue = "false",
             description = "Don't scale the slice time with the number of waiting tasks")
     boolean dontScaleSlice;
-
-    @Option(names = {"-z", "--seed"}, defaultValue = "31",
-            description = "Initial seed for the random number generator")
-    int seed;
 
     @Option(names = {"-m", "--max-iterations"}, defaultValue = "-1",
             description = "Maximum number of iterations")
@@ -63,6 +62,11 @@ public class Main implements Runnable{
             description = "Log the state changes")
     boolean log;
 
+    @Option(names = "--java", description = "Focus on Java application threads")
+    boolean focusOnJava;
+
+    long startOfFuzzingTime;
+
     boolean doesErrorScriptSucceed() {
         if (errorCommand.isEmpty()) {
             return false;
@@ -75,37 +79,25 @@ public class Main implements Runnable{
         }
     }
 
-    private int randomState;
-    private int curRandomState;
-
-    private int random() {
-        curRandomState = randomState;
-        randomState = randomState * 48271 % 0x7fffffff;
-        return curRandomState;
-    }
-
-
     /**
      * @return boolean should continue
      */
     boolean iteration() throws InterruptedException, IOException {
-        System.out.println("iterationtime " + iterationTimeNs);
-        System.out.println("runtime " + runRange);
-        System.out.println("slice " + sliceNs);
+        var seed = new Random().nextInt();
+        System.out.println("Iteration");
         boolean didProgramFail = false;
         Process process;
         try (var scheduler = BPFProgram.load(FIFOScheduler.class)) {
-            System.out.println("loaded");
             // we have a circular dependency here between getting the pid and setting the scheduler setting
             // sleeping for two seconds should prevent any issues
 
-            scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting(0, sleepRange, runRange, systemSliceNs, sliceNs, random(), !dontScaleSlice, log));
+            scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting(0, sleepRange, runRange, systemSliceNs, sliceNs, !dontScaleSlice, log, focusOnJava));
 
             scheduler.attachScheduler();
 
             process = new ProcessBuilder(script).start();
 
-            scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting((int)process.pid(), sleepRange, runRange, systemSliceNs, sliceNs, random(), !dontScaleSlice, log));
+            scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting((int) process.pid(), sleepRange, runRange, systemSliceNs, sliceNs, !dontScaleSlice, log, focusOnJava));
 
             long startTime = System.currentTimeMillis();
             long lastErrorCheckTime = System.currentTimeMillis();
@@ -119,15 +111,11 @@ public class Main implements Runnable{
                 }
                 if (System.currentTimeMillis() > lastErrorCheckTime + errorCheckIntervalNs / 1_000_000) {
                     if (doesErrorScriptSucceed()) {
-                        System.out.println("Break because process isn't alive");
-
                         didProgramFail = true;
                         break;
                     }
                 }
                 if (startTime + iterationTimeNs / 1_000_000 < System.currentTimeMillis()) {
-                    System.out.println("Break because process isn't alive222 " + iterationTimeNs / 1_000_000 );
-
                     break;
                 }
             }
@@ -142,10 +130,21 @@ public class Main implements Runnable{
 
     @Override
     public void run() {
-        this.randomState = seed;
+        this.startOfFuzzingTime = System.currentTimeMillis();
+        DiagramHelper diagram = new DiagramHelper();
         if (log) {
             var logPrintThread = new Thread(() -> {
-                TraceLog.getInstance().printLoop(true);
+                double[] firstTimestamp = new double[]{-1};
+                TraceLog.getInstance().printLoop(f -> {
+                    if (firstTimestamp[0] == -1) {
+                        firstTimestamp[0] = f.ts();
+                    }
+                    var time = f.ts() - firstTimestamp[0];
+                    var task = f.msg().split(" is ")[0];
+                    var duration = Integer.parseInt(f.msg().split(" for ")[1].split("ms")[0]) / 1000.0;
+                    diagram.recordEvent(time, task, f.msg().contains("is sleeping") ? DiagramHelper.EventType.SLEEPING : DiagramHelper.EventType.RUNNING, duration);
+                    return String.format("[%03.3f] %s", time, f.msg());
+                });
             });
             logPrintThread.setDaemon(true);
             logPrintThread.start();
@@ -153,7 +152,7 @@ public class Main implements Runnable{
         for (int i = 0; maxIterations < 0 || i < maxIterations; i++) {
             try {
                 if (iteration()) {
-                    System.out.println("Program failed with seed " + curRandomState);
+                    System.out.printf("Program failed after %.3f%n", (System.currentTimeMillis() - startOfFuzzingTime) / 1000.0);
                     break;
                 }
             } catch (Exception e) {
@@ -161,11 +160,13 @@ public class Main implements Runnable{
                 break;
             }
         }
-
+        /*if (log) {
+            System.out.println(diagram.createDataJSON());
+        }*/
     }
 
 
-    public static void main(String[] args) throws InterruptedException {
+    public static void main(String[] args) {
         var cli = new CommandLine(new Main());
         cli.setUnmatchedArgumentsAllowed(false)
                 .execute(args);

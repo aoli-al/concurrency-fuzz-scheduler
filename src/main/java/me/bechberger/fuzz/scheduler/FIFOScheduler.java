@@ -1,7 +1,6 @@
 package me.bechberger.fuzz.scheduler;
 
 import me.bechberger.ebpf.annotations.AlwaysInline;
-import me.bechberger.ebpf.annotations.Size;
 import me.bechberger.ebpf.annotations.Type;
 import me.bechberger.ebpf.annotations.Unsigned;
 import me.bechberger.ebpf.annotations.bpf.BPF;
@@ -14,7 +13,6 @@ import me.bechberger.ebpf.bpf.Scheduler;
 import me.bechberger.ebpf.bpf.map.BPFLRUHashMap;
 import me.bechberger.ebpf.runtime.BpfDefinitions;
 import me.bechberger.ebpf.runtime.TaskDefinitions;
-import me.bechberger.ebpf.type.Box;
 import me.bechberger.ebpf.type.Enum;
 import me.bechberger.ebpf.type.Ptr;
 import me.bechberger.fuzz.util.DurationConverter;
@@ -25,6 +23,7 @@ import static me.bechberger.ebpf.runtime.BpfDefinitions.bpf_cpumask_test_cpu;
 import static me.bechberger.ebpf.runtime.ScxDefinitions.*;
 import static me.bechberger.ebpf.runtime.ScxDefinitions.scx_dsq_id_flags.SCX_DSQ_LOCAL_ON;
 import static me.bechberger.ebpf.runtime.ScxDefinitions.scx_enq_flags.SCX_ENQ_PREEMPT;
+import static me.bechberger.ebpf.runtime.helpers.BPFHelpers.bpf_get_prandom_u32;
 import static me.bechberger.ebpf.runtime.helpers.BPFHelpers.bpf_ktime_get_ns;
 
 /**
@@ -50,7 +49,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     }
 
     @Type
-    public record SchedulerSetting(int scriptPID, DurationRange sleepRange, DurationRange runRange, long systemSliceNs, long sliceNs, int seed, boolean scaleSlice, boolean log) {
+    public record SchedulerSetting(int scriptPID, DurationRange sleepRange, DurationRange runRange, long systemSliceNs, long sliceNs, boolean scaleSlice, boolean log, boolean focusOnJava) {
     }
 
     @Type
@@ -75,7 +74,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
 
     private static final int SHARED_DSQ_ID = 0;
 
-    final GlobalVariable<SchedulerSetting> schedulerSetting = new GlobalVariable<>(new SchedulerSetting(0, new DurationRange(0, 0), new DurationRange(0, 0), 1000000, 1000000, 0, true, false));
+    final GlobalVariable<SchedulerSetting> schedulerSetting = new GlobalVariable<>(new SchedulerSetting(0, new DurationRange(0, 0), new DurationRange(0, 0), 1000000, 1000000, true, false, false));
 
     @BPFMapDefinition(maxEntries = 10000)
     BPFLRUHashMap<@Unsigned Integer, TaskContext> taskContexts;
@@ -83,8 +82,6 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     /** Is the task related to the fuzzed script? */
     @BPFMapDefinition(maxEntries = 100000)
     BPFLRUHashMap<@Unsigned Integer, Boolean> isScriptRelated;
-
-    final GlobalVariable<@Unsigned Integer> randomState = new GlobalVariable<>(0);
 
     @BPFFunction
     @AlwaysInline
@@ -112,16 +109,6 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     }
 
     /**
-     * Generate a random number using a Park-Miller linear congruential generator
-     * (h<a href="ttps://en.wikipedia.org/wiki/Lehmer_random_number_generator)">wikipedia</a>
-     */
-    @BPFFunction
-    @Unsigned long random() {
-        randomState.set(randomState.get() * 48271 % 0x7fffffff);
-        return randomState.get();
-    }
-
-    /**
      * Generate a random number in the range [min, max)
      */
     @BPFFunction
@@ -129,7 +116,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (min == max) {
             return min;
         }
-        return min + random() % (max - min);
+        return min + (bpf_get_prandom_u32() * 31L) % (max - min);
     }
 
     @BPFFunction
@@ -156,7 +143,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         context.val().lastStopNs = bpf_ktime_get_ns();
         context.val().timeAllowedInState = randomInRange(schedulerSetting.get().sleepRange.minNs(), schedulerSetting.get().sleepRange.maxNs());
         if (schedulerSetting.get().log()) {
-            bpf_trace_printk("Task %d (%s) is sleeping for %dms\n", context.val().timeAllowedInState, p.val().comm, context.val().timeAllowedInState / 1_000_000);
+            bpf_trace_printk("%s is sleeping for %dms\n", p.val().comm, context.val().timeAllowedInState / 1_000_000);
         }
     }
 
@@ -167,7 +154,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         context.val().lastStopNs = bpf_ktime_get_ns();
         context.val().timeAllowedInState = randomInRange(schedulerSetting.get().runRange.minNs(), schedulerSetting.get().runRange.maxNs());
         if (schedulerSetting.get().log()) {
-            bpf_trace_printk("Task %d (%s) is running for %dms\n", context.val().timeAllowedInState, p.val().comm, context.val().timeAllowedInState / 1_000_000);
+            bpf_trace_printk("%s is running for %dms\n", p.val().comm, context.val().timeAllowedInState / 1_000_000);
         }
     }
 
@@ -182,8 +169,10 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (context == null) {
             return true;
         }
-        if (p.val().comm[0] != 'j') {
-            return true;
+        if (schedulerSetting.get().focusOnJava) {
+            if (((p.val().comm[0] == 'C' || p.val().comm[0] == 'G') && (p.val().comm[1] == '1' || p.val().comm[1] == '2')) || (p.val().comm[0] == 'V' && p.val().comm[1] == 'M')) {
+                return true;
+            }
         }
         if (context.val().state == TaskState.START) { // initialize the task, randomly choose if it should sleep or run
             if (randomInRange(0, 2) == 0) {
@@ -212,7 +201,6 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
 
     @Override
     public int init() {
-        randomState.set(schedulerSetting.get().seed);
         return scx_bpf_create_dsq(SHARED_DSQ_ID, -1);
     }
 

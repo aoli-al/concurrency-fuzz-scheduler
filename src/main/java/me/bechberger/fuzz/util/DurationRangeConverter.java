@@ -8,7 +8,7 @@ import static me.bechberger.fuzz.util.DurationConverter.parseToNanoSeconds;
 public class DurationRangeConverter implements CommandLine.ITypeConverter<FIFOScheduler.DurationRange> {
 
     @Override
-    public FIFOScheduler.DurationRange convert(String s) throws Exception {
+    public FIFOScheduler.DurationRange convert(String s) {
         String[] parts = s.split(",");
         if (parts.length == 1) {
             return new FIFOScheduler.DurationRange(parseToNanoSeconds(parts[0]), parseToNanoSeconds(parts[0]));

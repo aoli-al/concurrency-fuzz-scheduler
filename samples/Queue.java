@@ -1,12 +1,6 @@
-import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ConcurrentLinkedDeque;
 
 public class Queue {
-
-    // program that has a producer and a consumer thread
-    // they share a queue
-    // items on the queue are invalid after 1 second
-    // crash if consumer tries to access invalid ite
-    // use Java queues
 
     record WorkItem(long timestamp, int value) {
         public boolean isValid() {
@@ -14,65 +8,45 @@ public class Queue {
         }
     }
 
-    private static final int ITEM_LIFETIME = 100;
+    private static final int ITEM_LIFETIME = 1000;
 
-    private final SynchronousQueue<WorkItem> queue;
+    private final ConcurrentLinkedDeque<WorkItem> queue;
 
     public Queue() {
-        this.queue = new SynchronousQueue<>();
+        this.queue = new ConcurrentLinkedDeque<>();
     }
 
     public void run() {
-        Thread producer = new Thread(() -> {
+        var producer = new Thread(() -> {
             while (true) {
                 produce((int) (Math.random() * 100));
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
-            }
-        });
-        Thread consumer = new Thread(() -> {
-            while (true) {
-                consume();
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
+                sleep(20);
             }
         });
         producer.setName("Producer");
-        consumer.setName("Consumer");
         producer.start();
+        var consumer = new Thread(() -> {
+            while (true) {
+                consume();
+                sleep(10);
+            }
+        });
+        consumer.setName("Consumer");
         consumer.start();
-        try {
-            producer.join();
-            consumer.join();
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
+        sleep(-1);
     }
 
     public void produce(int value) {
-        WorkItem item = new WorkItem(System.currentTimeMillis(), value);
-        try {
-            queue.put(item);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
+        queue.push(new WorkItem(System.currentTimeMillis(), value));
     }
 
     public int consume() {
-        WorkItem item = null;
-        try {
-            item = queue.take();
-        } catch (InterruptedException e) {
-            e.printStackTrace();
+        WorkItem item = queue.poll();
+        if (item == null) {
+            return -1;
         }
         if (!item.isValid()) {
-            System.err.println("Item is invalid!");
+            System.err.println("Item is invalid! time " + (System.currentTimeMillis() - item.timestamp));
             System.exit(1);
         }
         return item.value();
@@ -81,4 +55,14 @@ public class Queue {
     public static void main(String[] args) {
         new Queue().run();
     }
+
+    //<editor-fold desc="Boilerplate">
+    void sleep(long millis) {
+        try {
+            Thread.sleep(millis == -1 ? Long.MAX_VALUE : millis);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
+    //</editor-fold>
 }
