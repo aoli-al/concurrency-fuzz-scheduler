@@ -17,6 +17,7 @@ This is the code for the FOSDEM'25 talk [Concurrency Testing using Custom Linux 
 >
 > In this talk, we'll show you a prototypical sched_ext-based library for concurrency testing.
 
+If you want to learn even more on the general concepts, I can recommend reading the excellent [LWN article](https://lwn.net/SubscriberLink/1007689/922423e440f5e68a/).
 
 ## Usage
 
