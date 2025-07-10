@@ -21,17 +21,19 @@
     in
     {
       devShells = forEachSupportedSystem ({ pkgs }: {
-        default = (pkgs.buildFHSUserEnv {
-          name = "dev-env";
-          targetPkgs = pkgs: (with pkgs; [
+        default = pkgs.mkShell {
+          buildInputs = with pkgs; [
             libbpf
             jdk23
             maven
             bpftools
             llvmPackages_20.clang-unwrapped
-          ]);
-          runScript = "bash";
-        }).env;
+          ];
+          shellHook = ''
+            echo ${pkgs.libbpf}/lib
+            export LD_LIBRARY_PATH=${pkgs.libbpf}/lib:$LD_LIBRARY_PATH
+          '';
+        };
       });
     };
 }
