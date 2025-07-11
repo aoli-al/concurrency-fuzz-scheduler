@@ -86,7 +86,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (tgidRel == null) {
             var isRelated = curPid == scriptPid;
             if (!isRelated) {
-                 bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
+                 // bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
                 // check parent process
                 var parentTGid = task.val().real_parent.val().tgid;
                 var parentPid = task.val().real_parent.val().pid;
@@ -168,13 +168,13 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         final Ptr<TaskDefinitions.task_struct>[] pWithHighestPriority = new Ptr[]{null};
         final Ptr<BpfDefinitions.bpf_iter_scx_dsq>[] iterWithHighestPriority = new Ptr[]{null};
         final Long[] currentPriority = {-1L};
-//        bpf_trace_printk("Hello, World!");
         bpf_for_each_dsq(SHARED_DSQ_ID, p, iter -> {
             if (isTaskScriptRelated(p)) {
                 // We only want to dispatch tasks to CPU 0
                 if (cpu != 10) {
                     _continue();
                 }
+                bpf_trace_printk("Dispatching task %s with pid %d on CPU %d", p.val().comm, p.val().pid, cpu);
                 Ptr<TaskContext> context = null;
                 getTaskContext(p, Ptr.of(context));
                 if (context.val().priority > currentPriority[0]) {
@@ -206,7 +206,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (tgidRel == null) {
             var isRelated = curPid == scriptPid;
             if (!isRelated) {
-                bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
+                // bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
                 // check parent process
                 var parentTGid = task.val().real_parent.val().tgid;
                 var parentPid = task.val().real_parent.val().pid;

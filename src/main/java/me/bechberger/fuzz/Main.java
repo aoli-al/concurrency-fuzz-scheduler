@@ -95,7 +95,8 @@ public class Main implements Runnable {
 
             scheduler.attachScheduler();
 
-            process = new ProcessBuilder(script).start();
+            process = new ProcessBuilder(script)
+                    .start();
 
             scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting((int) process.pid(), sleepRange, runRange, systemSliceNs, sliceNs, !dontScaleSlice, log, focusOnJava));
 
@@ -106,6 +107,17 @@ public class Main implements Runnable {
                 if (!process.isAlive()) {
                     if (process.exitValue() != 0) {
                         didProgramFail = true;
+                        System.out.printf("Process exited with error code %d%n", process.exitValue());
+                        System.out.println(process.getOutputStream());
+                        StringBuilder output = new StringBuilder();
+                        try (BufferedReader reader = new BufferedReader(
+                                new InputStreamReader(process.getInputStream()))) {
+                            String line;
+                            while ((line = reader.readLine()) != null) {
+                                output.append(line).append("\n");
+                            }
+                        }
+                        System.out.println(output);
                     }
                     break;
                 }
