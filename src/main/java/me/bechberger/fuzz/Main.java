@@ -100,8 +100,6 @@ public class Main implements Runnable {
 
             scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting((int) process.pid(), sleepRange, runRange, systemSliceNs, sliceNs, !dontScaleSlice, log, focusOnJava));
 
-            long startTime = System.currentTimeMillis();
-            long lastErrorCheckTime = System.currentTimeMillis();
             while (scheduler.isSchedulerAttachedProperly()) {
                 Thread.sleep(100);
                 if (!process.isAlive()) {
@@ -109,25 +107,16 @@ public class Main implements Runnable {
                         didProgramFail = true;
                         System.out.printf("Process exited with error code %d%n", process.exitValue());
                         System.out.println(process.getOutputStream());
-                        StringBuilder output = new StringBuilder();
-                        try (BufferedReader reader = new BufferedReader(
-                                new InputStreamReader(process.getInputStream()))) {
-                            String line;
-                            while ((line = reader.readLine()) != null) {
-                                output.append(line).append("\n");
-                            }
+                    }
+                    StringBuilder output = new StringBuilder();
+                    try (BufferedReader reader = new BufferedReader(
+                            new InputStreamReader(process.getInputStream()))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            output.append(line).append("\n");
                         }
-                        System.out.println(output);
                     }
-                    break;
-                }
-                if (System.currentTimeMillis() > lastErrorCheckTime + errorCheckIntervalNs / 1_000_000) {
-                    if (doesErrorScriptSucceed()) {
-                        didProgramFail = true;
-                        break;
-                    }
-                }
-                if (startTime + iterationTimeNs / 1_000_000 < System.currentTimeMillis()) {
+                    System.out.println(output);
                     break;
                 }
             }

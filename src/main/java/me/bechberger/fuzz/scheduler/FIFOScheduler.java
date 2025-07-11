@@ -170,8 +170,8 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         final Long[] currentPriority = {-1L};
         bpf_for_each_dsq(SHARED_DSQ_ID, p, iter -> {
             if (isTaskScriptRelated(p)) {
-                // We only want to dispatch tasks to CPU 0
-                if (cpu != 10) {
+                // We only want to dispatch tasks to CPU 23
+                if (cpu != 23) {
                     _continue();
                 }
                 bpf_trace_printk("Dispatching task %s with pid %d on CPU %d", p.val().comm, p.val().pid, cpu);
@@ -219,7 +219,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
 
     @Override
     public void enable(Ptr<TaskDefinitions.task_struct> p) {
-        bpf_trace_printk("Hello, World2!");
+//        bpf_trace_printk("Hello, World2!");
         setupIsTaskRelatedToScript(p);
     }
 
