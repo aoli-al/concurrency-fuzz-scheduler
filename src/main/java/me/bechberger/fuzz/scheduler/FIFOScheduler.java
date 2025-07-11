@@ -59,17 +59,8 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
 
     @Type
     static class TaskContext {
-
         TaskState state;
-
-        @Unsigned long timeAllowedInState;
-
-        /** Time the task last has been started on the CPU */
-        @Unsigned long lastStartNs;
-        /** Total runtime of the task since it last slept */
-        @Unsigned long runtimeSinceLastSleepNs;
-        /** Time the task last has been moved off a CPU */
-        @Unsigned long lastStopNs;
+        @Unsigned long priority;
     }
 
     private static final int SHARED_DSQ_ID = 0;
@@ -95,7 +86,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (tgidRel == null) {
             var isRelated = curPid == scriptPid;
             if (!isRelated) {
-                // bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
+                 bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
                 // check parent process
                 var parentTGid = task.val().real_parent.val().tgid;
                 var parentPid = task.val().real_parent.val().pid;
@@ -127,76 +118,11 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (ret == null) {
             var context = new TaskContext();
             context.state = TaskState.START;
-            context.lastStartNs = 0;
-            context.runtimeSinceLastSleepNs = 0;
-            context.lastStopNs = 0;
+            context.priority = randomInRange(0, 1000);
             taskContexts.put(id, context);
         }
         var ret2 = taskContexts.bpf_get(id);
         contextPtr.set(ret2);
-    }
-
-    @BPFFunction
-    @AlwaysInline
-    void initSleeping(Ptr<TaskContext> context, Ptr<TaskDefinitions.task_struct> p) {
-        context.val().state = TaskState.SLEEPING;
-        context.val().lastStopNs = bpf_ktime_get_ns();
-        context.val().timeAllowedInState = randomInRange(schedulerSetting.get().sleepRange.minNs(), schedulerSetting.get().sleepRange.maxNs());
-        if (schedulerSetting.get().log()) {
-            bpf_trace_printk("%s is sleeping for %dms\n", p.val().comm, context.val().timeAllowedInState / 1_000_000);
-        }
-    }
-
-    @BPFFunction
-    @AlwaysInline
-    void initRunning(Ptr<TaskContext> context, Ptr<TaskDefinitions.task_struct> p) {
-        context.val().state = TaskState.RUNNING;
-        context.val().lastStopNs = bpf_ktime_get_ns();
-        context.val().timeAllowedInState = randomInRange(schedulerSetting.get().runRange.minNs(), schedulerSetting.get().runRange.maxNs());
-        if (schedulerSetting.get().log()) {
-            bpf_trace_printk("%s is running for %dms\n", p.val().comm, context.val().timeAllowedInState / 1_000_000);
-        }
-    }
-
-    @BPFFunction
-    @AlwaysInline
-    boolean updateStateIfNeededAndReturnIfSchedulable(Ptr<TaskDefinitions.task_struct> p) {
-        if (!isTaskScriptRelated(p)) { // don't schedule tasks that are not related to the script
-            return true;
-        }
-        Ptr<TaskContext> context = null;
-        getTaskContext(p, Ptr.of(context));
-        if (context == null) {
-            return true;
-        }
-        if (schedulerSetting.get().focusOnJava) {
-            if (((p.val().comm[0] == 'C' || p.val().comm[0] == 'G') && (p.val().comm[1] == '1' || p.val().comm[1] == '2')) || (p.val().comm[0] == 'V' && p.val().comm[1] == 'M')) {
-                return true;
-            }
-        }
-        if (context.val().state == TaskState.START) { // initialize the task, randomly choose if it should sleep or run
-            if (randomInRange(0, 2) == 0) {
-                initSleeping(context, p);
-                return false;
-            } else {
-                initRunning(context, p);
-                return true;
-            }
-        }
-
-        if (context.val().state == TaskState.RUNNING) { // check if the task has to sleep
-            if (bpf_ktime_get_ns() - context.val().lastStopNs >= context.val().timeAllowedInState) { // sleep if the task has run too long
-                initSleeping(context, p);
-                return false;
-            }
-            return true;
-        } else { // check if the task can be scheduled again
-            if (bpf_ktime_get_ns() - context.val().lastStopNs >= context.val().timeAllowedInState) {
-                initRunning(context, p);
-                return true;
-            }
-            return false;
-        }
     }
 
     @Override
@@ -239,37 +165,32 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     @Override
     public void dispatch(int cpu, Ptr<TaskDefinitions.task_struct> prev) {
         Ptr<TaskDefinitions.task_struct> p = null;
+        final Ptr<TaskDefinitions.task_struct>[] pWithHighestPriority = new Ptr[]{null};
+        final Ptr<BpfDefinitions.bpf_iter_scx_dsq>[] iterWithHighestPriority = new Ptr[]{null};
+        final Long[] currentPriority = {-1L};
+//        bpf_trace_printk("Hello, World!");
         bpf_for_each_dsq(SHARED_DSQ_ID, p, iter -> {
-            if (!updateStateIfNeededAndReturnIfSchedulable(p)) {
-                _continue();
-            }
-            if ((hasConstraints(p) || canScheduleOnCPU(p, cpu)) && tryDispatching(iter, p, cpu)) {
-                return; // has different semantics than continue, return will return from the dispatch function
+            if (isTaskScriptRelated(p)) {
+                // We only want to dispatch tasks to CPU 0
+                if (cpu != 10) {
+                    _continue();
+                }
+                Ptr<TaskContext> context = null;
+                getTaskContext(p, Ptr.of(context));
+                if (context.val().priority > currentPriority[0]) {
+                    currentPriority[0] = context.val().priority;
+                    pWithHighestPriority[0] = p;
+                    iterWithHighestPriority[0] = iter;
+                }
+            } else {
+                // if the task is not related to the script, we can always dispatch it
+                if ((hasConstraints(p) || canScheduleOnCPU(p, cpu)) && tryDispatching(iter, p, cpu)) {
+                    return; // has different semantics than continue, return will return from the dispatch function
+                }
             }
         });
-    }
-
-    @Override
-    public void running(Ptr<TaskDefinitions.task_struct> p) {
-        if (!isTaskScriptRelated(p)) {
-            return;
-        }
-        Ptr<TaskContext> context = null;
-        getTaskContext(p, Ptr.of(context));
-        if (context != null) {
-            context.val().lastStartNs = bpf_ktime_get_ns();
-        }
-    }
-
-    @Override
-    public void stopping(Ptr<TaskDefinitions.task_struct> p, boolean runnable) {
-        if (!isTaskScriptRelated(p)) {
-            return;
-        }
-        Ptr<TaskContext> context = null;
-        getTaskContext(p, Ptr.of(context));
-        if (context != null) {
-            context.val().runtimeSinceLastSleepNs = context.val().runtimeSinceLastSleepNs + (bpf_ktime_get_ns() - context.val().lastStartNs);
+        if (pWithHighestPriority[0] != null) {
+            tryDispatching(iterWithHighestPriority[0], pWithHighestPriority[0], cpu);
         }
     }
 
@@ -285,7 +206,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (tgidRel == null) {
             var isRelated = curPid == scriptPid;
             if (!isRelated) {
-               // bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
+                bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
                 // check parent process
                 var parentTGid = task.val().real_parent.val().tgid;
                 var parentPid = task.val().real_parent.val().pid;
@@ -298,6 +219,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
 
     @Override
     public void enable(Ptr<TaskDefinitions.task_struct> p) {
+        bpf_trace_printk("Hello, World2!");
         setupIsTaskRelatedToScript(p);
     }
 

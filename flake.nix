@@ -32,6 +32,7 @@
           shellHook = ''
             echo ${pkgs.libbpf}/lib
             export LD_LIBRARY_PATH=${pkgs.libbpf}/lib:$LD_LIBRARY_PATH
+            export EBPF_INCLUDE_PATH=${pkgs.libbpf}/include
           '';
         };
       });
