@@ -79,6 +79,19 @@ public class Main implements Runnable {
         }
     }
 
+    private long getCurrentTid() {
+        try {
+            // Read the current thread's kernel TID from /proc/self/task/
+            String tidStr = new String(java.nio.file.Files.readAllBytes(
+                    java.nio.file.Paths.get("/proc/self/task/" + Thread.currentThread().getId() + "/stat")))
+                    .split(" ")[0];
+            return Long.parseLong(tidStr);
+        } catch (Exception e) {
+            // Fallback to Java thread ID
+            return -1;
+        }
+    }
+
     /**
      * @return boolean should continue
      */
@@ -91,14 +104,16 @@ public class Main implements Runnable {
             // we have a circular dependency here between getting the pid and setting the scheduler setting
             // sleeping for two seconds should prevent any issues
 
-            scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting(0, sleepRange, runRange, systemSliceNs, sliceNs, !dontScaleSlice, log, focusOnJava));
-
+            long pid = ProcessHandle.current().pid();
+            System.out.println("Script PID: " + pid + ", TID: " + getCurrentTid());
+            scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting((int) pid, sleepRange, runRange,
+                    systemSliceNs,
+                    sliceNs, !dontScaleSlice, log, focusOnJava));
             scheduler.attachScheduler();
 
             process = new ProcessBuilder(script)
+                    .redirectErrorStream(true)
                     .start();
-
-            scheduler.setSchedulerSetting(new FIFOScheduler.SchedulerSetting((int) process.pid(), sleepRange, runRange, systemSliceNs, sliceNs, !dontScaleSlice, log, focusOnJava));
 
             while (scheduler.isSchedulerAttachedProperly()) {
                 Thread.sleep(100);
@@ -108,19 +123,19 @@ public class Main implements Runnable {
                         System.out.printf("Process exited with error code %d%n", process.exitValue());
                         System.out.println(process.getOutputStream());
                     }
-                    StringBuilder output = new StringBuilder();
-                    try (BufferedReader reader = new BufferedReader(
-                            new InputStreamReader(process.getInputStream()))) {
-                        String line;
-                        while ((line = reader.readLine()) != null) {
-                            output.append(line).append("\n");
-                        }
-                    }
-                    System.out.println(output);
                     break;
                 }
             }
         }
+        StringBuilder output = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
+            }
+        }
+        System.out.println(output);
         while (process.isAlive()) {
             process.destroy();
             System.out.println("Killing process");
@@ -168,9 +183,11 @@ public class Main implements Runnable {
 
 
     public static void main(String[] args) {
-        var cli = new CommandLine(new Main());
-        cli.setUnmatchedArgumentsAllowed(false)
-                .execute(args);
+        var main = new Main();
+        var cli = new CommandLine(main);
+        cli.setUnmatchedArgumentsAllowed(false);
+        cli.parseArgs(args);
+        main.run();
     }
 
 }

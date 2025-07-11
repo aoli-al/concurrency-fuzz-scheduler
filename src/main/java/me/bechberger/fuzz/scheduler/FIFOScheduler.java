@@ -23,8 +23,8 @@ import static me.bechberger.ebpf.runtime.BpfDefinitions.bpf_cpumask_test_cpu;
 import static me.bechberger.ebpf.runtime.ScxDefinitions.*;
 import static me.bechberger.ebpf.runtime.ScxDefinitions.scx_dsq_id_flags.SCX_DSQ_LOCAL_ON;
 import static me.bechberger.ebpf.runtime.ScxDefinitions.scx_enq_flags.SCX_ENQ_PREEMPT;
+import static me.bechberger.ebpf.runtime.helpers.BPFHelpers.bpf_get_current_task_btf;
 import static me.bechberger.ebpf.runtime.helpers.BPFHelpers.bpf_get_prandom_u32;
-import static me.bechberger.ebpf.runtime.helpers.BPFHelpers.bpf_ktime_get_ns;
 
 /**
  * FIFO round-robin scheduler
@@ -65,6 +65,9 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
 
     private static final int SHARED_DSQ_ID = 0;
 
+    final GlobalVariable<@Unsigned Integer> this_program_id =
+            new GlobalVariable<>(0);
+
     final GlobalVariable<SchedulerSetting> schedulerSetting = new GlobalVariable<>(new SchedulerSetting(0, new DurationRange(0, 0), new DurationRange(0, 0), 1000000, 1000000, true, false, false));
 
     @BPFMapDefinition(maxEntries = 10000)
@@ -77,26 +80,26 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     @BPFFunction
     @AlwaysInline
     boolean isTaskScriptRelated(Ptr<TaskDefinitions.task_struct> task) {
-        var curPid = task.val().tgid;
-        var tgidRel = isScriptRelated.bpf_get(curPid);
+        var curPid = task.val().pid;
+        var pidRel = isScriptRelated.bpf_get(curPid);
         var scriptPid = schedulerSetting.get().scriptPID;
         if (scriptPid == 0) {
             return false;
         }
-        if (tgidRel == null) {
-            var isRelated = curPid == scriptPid;
-            if (!isRelated) {
-                 // bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
-                // check parent process
-                var parentTGid = task.val().real_parent.val().tgid;
-                var parentPid = task.val().real_parent.val().pid;
-                isRelated = parentPid == scriptPid || parentTGid == scriptPid;
-            }
-            isScriptRelated.put(task.val().pid, isRelated);
+        if (pidRel == null) {
+            var isRelated =
+                    (task.val().comm[0] == 'r' && task.val().comm[1] == 'p' && task.val().comm[2] == 'c') ||
+                    (task.val().real_parent.val().pid == this_program_id.get());
             isScriptRelated.put(curPid, isRelated);
+            if (task.val().real_parent.val().pid == this_program_id.get()) {
+                bpf_trace_printk("Task %s with pid %d is related to (parent pid %d)", task.val().comm, curPid, task.val().real_parent.val().pid);
+            }
+//            if (isRelated) {
+//                bpf_trace_printk("Task %s with pid %d is related to script with pid %d", task.val().comm, curPid, 0);
+//            }
             return isRelated;
         }
-        return tgidRel.val();
+        return pidRel.val();
     }
 
     /**
@@ -127,6 +130,9 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
 
     @Override
     public int init() {
+        var current_task = bpf_get_current_task_btf();
+        bpf_trace_printk("Current task: %d ", current_task.val().pid);
+        this_program_id.set(current_task.val().pid);
         return scx_bpf_create_dsq(SHARED_DSQ_ID, -1);
     }
 
@@ -137,6 +143,9 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (schedulerSetting.get().scaleSlice()) {
             sliceLength = sliceLength / scx_bpf_dsq_nr_queued(SHARED_DSQ_ID);
         }
+//        if (isTaskScriptRelated(p)) {
+//            bpf_trace_printk("Enqueuing task %s with pid %d", p.val().comm, p.val().pid);
+//        }
         scx_bpf_dispatch(p, SHARED_DSQ_ID, sliceLength, enq_flags);
     }
 
@@ -165,67 +174,72 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
     @Override
     public void dispatch(int cpu, Ptr<TaskDefinitions.task_struct> prev) {
         Ptr<TaskDefinitions.task_struct> p = null;
-        final Ptr<TaskDefinitions.task_struct>[] pWithHighestPriority = new Ptr[]{null};
-        final Ptr<BpfDefinitions.bpf_iter_scx_dsq>[] iterWithHighestPriority = new Ptr[]{null};
-        final Long[] currentPriority = {-1L};
         bpf_for_each_dsq(SHARED_DSQ_ID, p, iter -> {
             if (isTaskScriptRelated(p)) {
                 // We only want to dispatch tasks to CPU 23
-                if (cpu != 23) {
+                if (cpu != 8) {
                     _continue();
                 }
-                bpf_trace_printk("Dispatching task %s with pid %d on CPU %d", p.val().comm, p.val().pid, cpu);
-                Ptr<TaskContext> context = null;
-                getTaskContext(p, Ptr.of(context));
-                if (context.val().priority > currentPriority[0]) {
-                    currentPriority[0] = context.val().priority;
-                    pWithHighestPriority[0] = p;
-                    iterWithHighestPriority[0] = iter;
+                long priority = randomInRange(0, 3);
+                if (priority == 0L) {
+                    bpf_trace_printk("Dispatching task %s with pid %d to CPU %d", p.val().comm, p.val().pid, cpu);
+                    tryDispatching(iter, p, cpu);
+                    return;
                 }
             } else {
-                // if the task is not related to the script, we can always dispatch it
                 if ((hasConstraints(p) || canScheduleOnCPU(p, cpu)) && tryDispatching(iter, p, cpu)) {
                     return; // has different semantics than continue, return will return from the dispatch function
                 }
             }
         });
-        if (pWithHighestPriority[0] != null) {
-            tryDispatching(iterWithHighestPriority[0], pWithHighestPriority[0], cpu);
-        }
+        bpf_for_each_dsq(SHARED_DSQ_ID, p, iter -> {
+            if (isTaskScriptRelated(p)) {
+                // We only want to dispatch tasks to CPU 23
+                if (cpu != 8) {
+                    _continue();
+                }
+                bpf_trace_printk("backup: Dispatching task %s with pid %d to CPU %d", p.val().comm, p.val().pid, cpu);
+                tryDispatching(iter, p, cpu);
+                return;
+            } else {
+                if ((hasConstraints(p) || canScheduleOnCPU(p, cpu)) && tryDispatching(iter, p, cpu)) {
+                    return; // has different semantics than continue, return will return from the dispatch function
+                }
+            }
+        });
     }
 
     @BPFFunction
     @AlwaysInline
     void setupIsTaskRelatedToScript(Ptr<TaskDefinitions.task_struct> task) {
-        var curPid = task.val().tgid;
-        var tgidRel = isScriptRelated.bpf_get(curPid);
+        var curPid = task.val().pid;
+        var pidRel = isScriptRelated.bpf_get(curPid);
         var scriptPid = schedulerSetting.get().scriptPID;
         if (scriptPid == 0) {
             return;
         }
-        if (tgidRel == null) {
-            var isRelated = curPid == scriptPid;
-            if (!isRelated) {
-                // bpf_trace_printk("Process %s has parent %s", task.val().comm, task.val().real_parent.val().comm);
-                // check parent process
-                var parentTGid = task.val().real_parent.val().tgid;
-                var parentPid = task.val().real_parent.val().pid;
-                isRelated = parentPid == scriptPid || parentTGid == scriptPid;
-            }
-            isScriptRelated.put(task.val().pid, isRelated);
+        if (pidRel == null) {
+            var isRelated =
+                    task.val().comm[0] == 'r' && task.val().comm[1] == 'p' && task.val().comm[2] == 'c';
             isScriptRelated.put(curPid, isRelated);
+            if (isRelated) {
+                bpf_trace_printk("Task %s with pid %d is related to script with pid %d", task.val().comm, curPid, 0);
+            } else {
+                bpf_trace_printk("Task %s with pid %d is NOT related. parent pid %d", task.val().comm, curPid,
+                        task.val().real_parent.val().pid);
+            }
         }
     }
 
     @Override
     public void enable(Ptr<TaskDefinitions.task_struct> p) {
 //        bpf_trace_printk("Hello, World2!");
-        setupIsTaskRelatedToScript(p);
+//        setupIsTaskRelatedToScript(p);
     }
 
     @Override
     public void disable(Ptr<TaskDefinitions.task_struct> p) {
-        isScriptRelated.bpf_delete(p.val().tgid);
+        isScriptRelated.bpf_delete(p.val().pid);
     }
 
     public void setSchedulerSetting(SchedulerSetting setting) {
