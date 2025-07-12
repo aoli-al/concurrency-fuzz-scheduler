@@ -120,6 +120,17 @@ public class Main implements Runnable {
                 }
             }
         }
+
+        StringBuilder output = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
+            }
+        }
+        System.out.println(output);
+
         while (process.isAlive()) {
             process.destroy();
             System.out.println("Killing process");
