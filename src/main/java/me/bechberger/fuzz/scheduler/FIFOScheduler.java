@@ -89,11 +89,17 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
         if (pidRel == null) {
             var isRelated =
                     (task.val().comm[0] == 'r' && task.val().comm[1] == 'p' && task.val().comm[2] == 'c') ||
-                    (task.val().real_parent.val().pid == this_program_id.get());
+                            (task.val().comm[0] == 't' && task.val().comm[1] == 'a' && task.val().comm[2] == 's') ||
+                            (task.val().comm[0] == 's' && task.val().comm[1] == 'h');
             isScriptRelated.put(curPid, isRelated);
-            if (task.val().real_parent.val().pid == this_program_id.get()) {
-                bpf_trace_printk("Task %s with pid %d is related to (parent pid %d)", task.val().comm, curPid, task.val().real_parent.val().pid);
+            if (isRelated) {
+                bpf_trace_printk("Control task %s with pid %d (parent pid %d)", task.val().comm, curPid,
+                        task.val().real_parent.val().pid);
             }
+//            else {
+//                bpf_trace_printk("Task %s with pid %d is NOT related. parent pid %d", task.val().comm, curPid,
+//                        task.val().real_parent.val().pid);
+//            }
 //            if (isRelated) {
 //                bpf_trace_printk("Task %s with pid %d is related to script with pid %d", task.val().comm, curPid, 0);
 //            }
@@ -180,9 +186,9 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
                 if (cpu != 8) {
                     _continue();
                 }
-                long priority = randomInRange(0, 3);
+                long priority = randomInRange(0, 5);
                 if (priority == 0L) {
-                    bpf_trace_printk("Dispatching task %s with pid %d to CPU %d", p.val().comm, p.val().pid, cpu);
+//                    bpf_trace_printk("Dispatching task %s with pid %d to CPU %d", p.val().comm, p.val().pid, cpu);
                     tryDispatching(iter, p, cpu);
                     return;
                 }
@@ -198,7 +204,7 @@ public abstract class FIFOScheduler extends BPFProgram implements Scheduler {
                 if (cpu != 8) {
                     _continue();
                 }
-                bpf_trace_printk("backup: Dispatching task %s with pid %d to CPU %d", p.val().comm, p.val().pid, cpu);
+//                bpf_trace_printk("backup: Dispatching task %s with pid %d to CPU %d", p.val().comm, p.val().pid, cpu);
                 tryDispatching(iter, p, cpu);
                 return;
             } else {
